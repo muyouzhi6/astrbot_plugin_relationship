@@ -284,7 +284,13 @@ class RelationshipPlugin(Star):
 
         gid = str(group_id).strip()
         if not gid:
-            current_group, _ = get_delivery_target(event)
+            current_group, current_user = get_delivery_target(event)
+            if (
+                current_group is None
+                and current_user is None
+                and not isinstance(event, AiocqhttpMessageEvent)
+            ):
+                return UNAVAILABLE_MESSAGE
             gid = str(current_group or "")
         if not gid.isdigit():
             return "退群失败: group_id 必须为纯数字群号。"

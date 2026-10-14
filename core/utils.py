@@ -63,9 +63,15 @@ def get_delivery_target(event) -> tuple[int | None, int | None]:
         is_group = False
     else:
         return None, None
-    if not target_id.isdigit() or int(target_id) <= 0:
+    if not target_id.isdigit():
         return None, None
-    return (int(target_id), None) if is_group else (None, int(target_id))
+    try:
+        target = int(target_id)
+    except ValueError:
+        return None, None
+    if target <= 0:
+        return None, None
+    return (target, None) if is_group else (None, target)
 
 
 def convert_duration_advanced(duration: int) -> str:

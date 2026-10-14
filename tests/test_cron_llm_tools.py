@@ -431,7 +431,10 @@ async def test_cron_leave_group_uses_original_group_only(
     result = await plugin.llm_leave_group(event, group_id=requested)
 
     if expected is None:
-        assert "退群失败" in result
+        if kind == "OTHER_MESSAGE":
+            assert result == UNAVAILABLE
+        else:
+            assert "退群失败" in result
         bot.set_group_leave.assert_not_awaited()
     else:
         assert result == f"成功退出群聊: {expected}"
@@ -598,6 +601,68 @@ async def test_cron_unavailable_returns_stop_instruction(
     assert UNAVAILABLE in result
     bot.get_group_msg_history.assert_not_awaited()
     bot.send_group_forward_msg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_id",
+    ["²", "9" * 4301],
+    ids=["superscript_digit", "4301_digits"],
+)
+@pytest.mark.parametrize(
+    "kind,prefix",
+    [("GROUP_MESSAGE", ""), ("GROUP_MESSAGE", "88_"), ("FRIEND_MESSAGE", "")],
+    ids=["group", "prefixed_group", "private"],
+)
+@pytest.mark.parametrize(
+    "method,kwargs",
+    [
+        ("llm_check_messages", {"target_id": "999"}),
+        ("llm_check_messages", {}),
+        ("llm_send_contact_card", {"target_id": "55"}),
+        ("llm_send_contact_card", {}),
+        ("llm_leave_group", {}),
+    ],
+    ids=["check_explicit", "check_random", "card_explicit", "card_random", "leave"],
+)
+async def test_cron_numeric_conversion_failure_stops_before_api_calls(
+    plugin_modules, invalid_id, kind, prefix, method, kwargs
+):
+    mods = plugin_modules
+    bot = make_bot()
+    plugin = make_plugin(mods, {"qq-main": platform("aiocqhttp", bot, "qq-main")})
+    event = mods.CronEvent(
+        session(mods, getattr(mods.MessageType, kind), prefix + invalid_id)
+    )
+
+    assert await getattr(plugin, method)(event, **kwargs) == UNAVAILABLE
+
+    for api in vars(bot).values():
+        if isinstance(api, AsyncMock):
+            api.assert_not_called()
+    bot.api.call_action.assert_not_called()
+    assert not event.stopped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["GROUP_MESSAGE", "FRIEND_MESSAGE"])
+async def test_normal_qq_default_leave_group_keeps_existing_behavior(
+    plugin_modules, kind
+):
+    mods = plugin_modules
+    bot = make_bot()
+    plugin = make_plugin(mods, {})
+    event = mods.QQEvent(bot, session(mods, getattr(mods.MessageType, kind), "456"))
+
+    result = await plugin.llm_leave_group(event)
+
+    if kind == "GROUP_MESSAGE":
+        assert result == "成功退出群聊: 456"
+        bot.set_group_leave.assert_awaited_once_with(group_id=456)
+    else:
+        assert result == "退群失败: group_id 必须为纯数字群号。"
+        bot.set_group_leave.assert_not_called()
+    plugin.context.get_platform_inst.assert_not_called()
 
 
 @pytest.mark.asyncio
