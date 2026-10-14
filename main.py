@@ -16,6 +16,7 @@ from .core.request import RequestHandle
 from .core.utils import (
     UNAVAILABLE_MESSAGE,
     get_aiocqhttp_client,
+    get_aiocqhttp_self_id,
     get_ats,
     get_delivery_target,
     get_nickname,
@@ -281,7 +282,10 @@ class RelationshipPlugin(Star):
         if client is None:
             return UNAVAILABLE_MESSAGE
 
-        gid = str(group_id).strip() or event.get_group_id() or ""
+        gid = str(group_id).strip()
+        if not gid:
+            current_group, _ = get_delivery_target(event)
+            gid = str(current_group or "")
         if not gid.isdigit():
             return "退群失败: group_id 必须为纯数字群号。"
 
@@ -389,18 +393,26 @@ class RelationshipPlugin(Star):
         if not uid_str.isdigit():
             return "发起好友申请失败: user_id 必须为纯数字QQ号。"
 
-        target_uin = int(uid_str)
-        self_id = int(event.get_self_id())
-
-        if not verify:
-            gid = event.get_group_id()
-            group_id = int(gid) if gid else 0
-            group_info = await client.get_group_info(group_id=group_id, no_cache=True)
-            group_name = group_info.get("group_name", str(group_id))
-            self_name = await get_nickname(client, group_id, self_id)
-            verify = f"我是来自{group_name}的{self_name}"
-
         try:
+            target_uin = int(uid_str)
+            self_id = await get_aiocqhttp_self_id(event, client)
+            if self_id is None:
+                return UNAVAILABLE_MESSAGE
+
+            if not verify:
+                group_id, _ = get_delivery_target(event)
+                if group_id is None and not isinstance(event, AiocqhttpMessageEvent):
+                    self_name = await get_nickname(client, "", self_id)
+                    verify = f"我是{self_name}"
+                else:
+                    group_id = group_id or 0
+                    group_info = await client.get_group_info(
+                        group_id=group_id, no_cache=True
+                    )
+                    group_name = group_info.get("group_name", str(group_id))
+                    self_name = await get_nickname(client, group_id, self_id)
+                    verify = f"我是来自{group_name}的{self_name}"
+
             msg = await ExpansionHandle.add_friend(
                 client=client,
                 target_uin=target_uin,
@@ -440,17 +452,19 @@ class RelationshipPlugin(Star):
         if not gid_str.isdigit():
             return "发起加群申请失败: group_id 必须为纯数字群号。"
 
-        target_gid = int(gid_str)
-        self_id = int(event.get_self_id())
-
-        if not answer:
-            gid = event.get_group_id()
-            group_id_val = int(gid) if gid else 0
-            sender_name = event.get_sender_name()
-            self_name = await get_nickname(client, group_id_val, self_id)
-            answer = f"我是{sender_name}推荐来的{self_name}"
-
         try:
+            target_gid = int(gid_str)
+            if not answer:
+                self_id = await get_aiocqhttp_self_id(event, client)
+                if self_id is None:
+                    return UNAVAILABLE_MESSAGE
+                group_id_val, _ = get_delivery_target(event)
+                if group_id_val is None:
+                    group_id_val = 0 if isinstance(event, AiocqhttpMessageEvent) else ""
+                sender_name = event.get_sender_name()
+                self_name = await get_nickname(client, group_id_val, self_id)
+                answer = f"我是{sender_name}推荐来的{self_name}"
+
             msg = await ExpansionHandle.add_group(
                 client=client,
                 target_gid=target_gid,

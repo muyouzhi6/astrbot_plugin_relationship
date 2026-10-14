@@ -30,6 +30,18 @@ def get_aiocqhttp_client(event, context) -> CQHttp | None:
         return None
 
 
+async def get_aiocqhttp_self_id(event, client: CQHttp) -> int | None:
+    try:
+        if isinstance(event, AiocqhttpMessageEvent):
+            self_id = event.get_self_id()
+        else:
+            self_id = (await client.get_login_info())["user_id"]
+        self_id = int(str(self_id))
+        return self_id if self_id > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def get_delivery_target(event) -> tuple[int | None, int | None]:
     if isinstance(event, AiocqhttpMessageEvent):
         group_id = str(event.get_group_id())

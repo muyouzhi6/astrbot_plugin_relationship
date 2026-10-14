@@ -59,6 +59,9 @@ def plugin_modules():
         def get_sender_id(self):
             return "88"
 
+        def get_sender_name(self):
+            return "caller"
+
         def is_private_chat(self):
             return self.session.message_type == MessageType.FRIEND_MESSAGE
 
@@ -82,13 +85,16 @@ def plugin_modules():
             return []
 
         def get_self_id(self):
-            return "42"
+            return "astrbot"
 
         def get_group_id(self):
             return ""
 
         def get_sender_id(self):
             return self.session.session_id
+
+        def get_sender_name(self):
+            return "Scheduler"
 
         def is_private_chat(self):
             return self.session.message_type == MessageType.FRIEND_MESSAGE
@@ -181,6 +187,10 @@ def plugin_modules():
 
 def make_bot():
     return SimpleNamespace(
+        get_login_info=AsyncMock(return_value={"user_id": 42, "nickname": "bot"}),
+        get_group_info=AsyncMock(return_value={"group_name": "source"}),
+        get_group_member_info=AsyncMock(return_value={"nickname": "bot"}),
+        get_stranger_info=AsyncMock(return_value={"nickname": "bot"}),
         get_group_list=AsyncMock(
             return_value=[{"group_id": 123, "group_name": "source"}]
         ),
@@ -226,6 +236,222 @@ def session(mods, kind, session_id, platform_id="qq-main"):
     return SimpleNamespace(
         message_type=kind, session_id=session_id, platform_id=platform_id
     )
+
+
+@pytest.fixture
+def expansion(plugin_modules, monkeypatch):
+    handle = SimpleNamespace(
+        add_friend=AsyncMock(return_value="好友申请成功"),
+        add_group=AsyncMock(return_value="加群申请成功"),
+    )
+    monkeypatch.setattr(sys.modules["repo.core.expansion"], "ExpansionHandle", handle)
+    return handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,sid", [("GROUP_MESSAGE", "88_456"), ("FRIEND_MESSAGE", "777")]
+)
+@pytest.mark.parametrize("tool", ["friend", "group"])
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_cron_extension_requests_use_selected_account(
+    plugin_modules, expansion, kind, sid, tool, explicit
+):
+    mods = plugin_modules
+    bot, other = make_bot(), make_bot()
+    bot.get_login_info.return_value["user_id"] = "84"
+    plugin = make_plugin(
+        mods,
+        {
+            "qq-other": platform("aiocqhttp", other, "qq-other"),
+            "qq-main": platform("aiocqhttp", bot, "qq-main"),
+        },
+    )
+    event = mods.CronEvent(session(mods, getattr(mods.MessageType, kind), sid))
+    assert event.get_self_id() == "astrbot"
+
+    if tool == "friend":
+        result = await plugin.llm_add_friend_request(
+            event,
+            user_id="55",
+            verify="hello" if explicit else "",
+            remark="备注",
+            answer="答案",
+        )
+        expected_verify = (
+            "我是来自source的bot" if kind == "GROUP_MESSAGE" else "我是bot"
+        )
+        expansion.add_friend.assert_awaited_once_with(
+            client=bot,
+            target_uin=55,
+            self_id=84,
+            verify="hello" if explicit else expected_verify,
+            remark="备注",
+            answer="答案",
+        )
+        assert result == "好友申请成功"
+    else:
+        result = await plugin.llm_add_group_request(
+            event,
+            group_id="123",
+            answer="hello" if explicit else "",
+        )
+        expansion.add_group.assert_awaited_once_with(
+            client=bot,
+            target_gid=123,
+            answer="hello" if explicit else "我是Scheduler推荐来的bot",
+        )
+        assert result == "加群申请成功"
+
+    plugin.context.get_platform_inst.assert_called_once_with("qq-main")
+    other.get_login_info.assert_not_awaited()
+    if tool == "friend" or not explicit:
+        bot.get_login_info.assert_awaited_once_with()
+    else:
+        bot.get_login_info.assert_not_awaited()
+    if not explicit and kind == "GROUP_MESSAGE":
+        bot.get_group_member_info.assert_awaited_once_with(group_id=456, user_id=84)
+        if tool == "friend":
+            bot.get_group_info.assert_awaited_once_with(group_id=456, no_cache=True)
+    elif not explicit:
+        bot.get_stranger_info.assert_awaited_once_with(user_id=84)
+        bot.get_group_info.assert_not_awaited()
+    else:
+        bot.get_group_info.assert_not_awaited()
+        bot.get_group_member_info.assert_not_awaited()
+        bot.get_stranger_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["friend", "group"])
+@pytest.mark.parametrize(
+    "login_info",
+    [
+        None,
+        {},
+        {"user_id": "astrbot"},
+        {"user_id": 0},
+        {"user_id": -1},
+        {"user_id": "9" * 4301},
+        RuntimeError("offline"),
+    ],
+)
+async def test_cron_extension_missing_identity_stops_cleanly(
+    plugin_modules, expansion, tool, login_info
+):
+    mods = plugin_modules
+    bot = make_bot()
+    if isinstance(login_info, Exception):
+        bot.get_login_info.side_effect = login_info
+    else:
+        bot.get_login_info.return_value = login_info
+    plugin = make_plugin(mods, {"qq-main": platform("aiocqhttp", bot, "qq-main")})
+    event = mods.CronEvent(session(mods, mods.MessageType.GROUP_MESSAGE, "88_456"))
+
+    if tool == "friend":
+        result = await plugin.llm_add_friend_request(
+            event, user_id="55", verify="hello"
+        )
+    else:
+        result = await plugin.llm_add_group_request(event, group_id="123")
+
+    assert result == UNAVAILABLE
+    expansion.add_friend.assert_not_awaited()
+    expansion.add_group.assert_not_awaited()
+    bot.get_group_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["GROUP_MESSAGE", "FRIEND_MESSAGE"])
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_normal_extension_requests_keep_event_identity_and_greetings(
+    plugin_modules, expansion, kind, explicit
+):
+    mods = plugin_modules
+    bot = make_bot()
+    bot.get_login_info.side_effect = AssertionError(
+        "QQ events already have an identity"
+    )
+    plugin = make_plugin(mods, {})
+    event = mods.QQEvent(bot, session(mods, getattr(mods.MessageType, kind), "456"))
+
+    assert (
+        await plugin.llm_add_friend_request(
+            event,
+            user_id="55",
+            verify="hello" if explicit else "",
+        )
+        == "好友申请成功"
+    )
+    expansion.add_friend.assert_awaited_once_with(
+        client=bot,
+        target_uin=55,
+        self_id=42,
+        verify="hello" if explicit else "我是来自source的bot",
+        remark="",
+        answer="",
+    )
+    assert (
+        await plugin.llm_add_group_request(
+            event,
+            group_id="123",
+            answer="hello" if explicit else "",
+        )
+        == "加群申请成功"
+    )
+    expansion.add_group.assert_awaited_once_with(
+        client=bot,
+        target_gid=123,
+        answer="hello" if explicit else "我是caller推荐来的bot",
+    )
+    bot.get_login_info.assert_not_awaited()
+    plugin.context.get_platform_inst.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,sid,requested,expected",
+    [
+        ("GROUP_MESSAGE", "88_456", "", 456),
+        ("GROUP_MESSAGE", "456", "", 456),
+        ("GROUP_MESSAGE", "88_456", "123", 123),
+        ("FRIEND_MESSAGE", "777", "", None),
+        ("FRIEND_MESSAGE", "777", "123", 123),
+        ("OTHER_MESSAGE", "job", "", None),
+    ],
+)
+async def test_cron_leave_group_uses_original_group_only(
+    plugin_modules, kind, sid, requested, expected
+):
+    mods = plugin_modules
+    bot = make_bot()
+    plugin = make_plugin(mods, {"qq-main": platform("aiocqhttp", bot, "qq-main")})
+    event = mods.CronEvent(session(mods, getattr(mods.MessageType, kind), sid))
+
+    result = await plugin.llm_leave_group(event, group_id=requested)
+
+    if expected is None:
+        assert "退群失败" in result
+        bot.set_group_leave.assert_not_awaited()
+    else:
+        assert result == f"成功退出群聊: {expected}"
+        bot.set_group_leave.assert_awaited_once_with(group_id=expected)
+
+
+@pytest.mark.asyncio
+async def test_cron_default_verification_api_error_returns_failure(
+    plugin_modules, expansion
+):
+    mods = plugin_modules
+    bot = make_bot()
+    bot.get_group_info.side_effect = RuntimeError("group unavailable")
+    plugin = make_plugin(mods, {"qq-main": platform("aiocqhttp", bot, "qq-main")})
+    event = mods.CronEvent(session(mods, mods.MessageType.GROUP_MESSAGE, "88_456"))
+
+    result = await plugin.llm_add_friend_request(event, user_id="55")
+
+    assert result == "发起好友申请失败: group unavailable"
+    expansion.add_friend.assert_not_awaited()
 
 
 @pytest.mark.asyncio
