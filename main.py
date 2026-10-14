@@ -13,7 +13,13 @@ from .core.forward import ForwardTool
 from .core.normal import NormalHandle
 from .core.notice import NoticeHandle
 from .core.request import RequestHandle
-from .core.utils import get_ats, get_nickname
+from .core.utils import (
+    UNAVAILABLE_MESSAGE,
+    get_aiocqhttp_client,
+    get_ats,
+    get_delivery_target,
+    get_nickname,
+)
 
 
 class RelationshipPlugin(Star):
@@ -23,7 +29,7 @@ class RelationshipPlugin(Star):
         self.normal = NormalHandle(self.cfg)
         self.request = RequestHandle(self.cfg)
         self.notice = NoticeHandle(self.cfg)
-        self.contact = ContactHandle(self.cfg)
+        self.contact = ContactHandle(self.cfg, context)
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("群列表")
@@ -114,6 +120,7 @@ class RelationshipPlugin(Star):
         count = count or self.cfg.check.count
         async for msg in ForwardTool.check_messages(
             event,
+            context=self.context,
             target_id=group_id,
             count=count,
         ):
@@ -217,7 +224,9 @@ class RelationshipPlugin(Star):
         if need_auth and not event.is_admin():
             return "获取群列表失败: 仅管理员有权限查看群列表。"
         try:
-            client = event.bot
+            client = get_aiocqhttp_client(event, self.context)
+            if client is None:
+                return UNAVAILABLE_MESSAGE
             group_list = await client.get_group_list()
             if not group_list:
                 return "当前机器人未加入任何群聊。"
@@ -242,7 +251,9 @@ class RelationshipPlugin(Star):
         if need_auth and not event.is_admin():
             return "获取好友列表失败: 仅管理员有权限查看好友列表。"
         try:
-            client = event.bot
+            client = get_aiocqhttp_client(event, self.context)
+            if client is None:
+                return UNAVAILABLE_MESSAGE
             friend_list = await client.get_friend_list()
             if not friend_list:
                 return "当前机器人没有任何好友。"
@@ -266,13 +277,15 @@ class RelationshipPlugin(Star):
         """
         if not event.is_admin():
             return "退群失败: 仅管理员有权限执行退群操作。"
+        client = get_aiocqhttp_client(event, self.context)
+        if client is None:
+            return UNAVAILABLE_MESSAGE
 
         gid = str(group_id).strip() or event.get_group_id() or ""
         if not gid.isdigit():
             return "退群失败: group_id 必须为纯数字群号。"
 
         try:
-            client = event.bot
             await client.set_group_leave(group_id=int(gid))
             return f"成功退出群聊: {gid}"
         except Exception as e:
@@ -291,13 +304,15 @@ class RelationshipPlugin(Star):
         """
         if not event.is_admin():
             return "删除好友失败: 仅管理员有权限执行删除好友操作。"
+        client = get_aiocqhttp_client(event, self.context)
+        if client is None:
+            return UNAVAILABLE_MESSAGE
 
         uid = str(user_id).strip()
         if not uid.isdigit():
             return "删除好友失败: user_id 必须为纯数字QQ号。"
 
         try:
-            client = event.bot
             await client.delete_friend(user_id=int(uid))
             return f"成功删除好友: {uid}"
         except Exception as e:
@@ -316,10 +331,13 @@ class RelationshipPlugin(Star):
             target_id(string): 推荐目标的 QQ 号或群号，为空时随机选择一个好友或群推荐。
             target_type(string): 推荐类型，'qq' 为好友/用户推荐名片，'group' 为群推荐名片。默认为 'qq'。
         """
+        client = get_aiocqhttp_client(event, self.context)
+        if client is None or not any(get_delivery_target(event)):
+            return UNAVAILABLE_MESSAGE
         try:
             tid = str(target_id).strip()
             if not tid:
-                uids, gids = await self.contact._get_random_target(client=event.bot)
+                uids, gids = await self.contact._get_random_target(client=client)
                 if uids:
                     await self.contact._send_contact(event, uid=uids[0])
                     return f"已成功发送推荐好友名片: {uids[0]}"
@@ -359,6 +377,9 @@ class RelationshipPlugin(Star):
         """
         if not event.is_admin():
             return "发起好友申请失败: 仅管理员有权限操作。"
+        client = get_aiocqhttp_client(event, self.context)
+        if client is None:
+            return UNAVAILABLE_MESSAGE
         try:
             from .core.expansion import ExpansionHandle
         except ImportError:
@@ -369,7 +390,6 @@ class RelationshipPlugin(Star):
             return "发起好友申请失败: user_id 必须为纯数字QQ号。"
 
         target_uin = int(uid_str)
-        client = event.bot
         self_id = int(event.get_self_id())
 
         if not verify:
@@ -408,6 +428,9 @@ class RelationshipPlugin(Star):
         """
         if not event.is_admin():
             return "发起加群申请失败: 仅管理员有权限操作。"
+        client = get_aiocqhttp_client(event, self.context)
+        if client is None:
+            return UNAVAILABLE_MESSAGE
         try:
             from .core.expansion import ExpansionHandle
         except ImportError:
@@ -418,7 +441,6 @@ class RelationshipPlugin(Star):
             return "发起加群申请失败: group_id 必须为纯数字群号。"
 
         target_gid = int(gid_str)
-        client = event.bot
         self_id = int(event.get_self_id())
 
         if not answer:
@@ -457,12 +479,9 @@ class RelationshipPlugin(Star):
         tid = str(target_id).strip() or None
         target_count = count or self.cfg.check.count
         try:
-            async for _ in ForwardTool.check_messages(
-                event,
-                target_id=tid,
-                count=target_count,
-            ):
-                pass
-            return "抽查任务已执行完成，合并转发消息已发送。"
+            error = await ForwardTool.run_check(
+                event, context=self.context, target_id=tid, count=target_count
+            )
+            return error or "抽查任务已执行完成，合并转发消息已发送。"
         except Exception as e:
             return f"抽查失败: {e}"

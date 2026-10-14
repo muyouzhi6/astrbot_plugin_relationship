@@ -1,11 +1,59 @@
 import re
 
 from aiocqhttp import CQHttp
-
 from astrbot.core.message.components import At, Plain, Reply
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+
+UNAVAILABLE_MESSAGE = (
+    "此工具在当前上下文不可用，不要再用 shell/python/数据库等其他方式读取聊天记录，"
+    "直接结束本次检查"
+)
+
+
+def get_aiocqhttp_client(event, context) -> CQHttp | None:
+    if isinstance(event, AiocqhttpMessageEvent):
+        return event.bot
+
+    session = getattr(event, "session", None)
+    platform_id = getattr(session, "platform_id", None)
+    if not platform_id:
+        return None
+    try:
+        platform = context.get_platform_inst(platform_id)
+        if platform is None or platform.meta().name != "aiocqhttp":
+            return None
+        return platform.get_client()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def get_delivery_target(event) -> tuple[int | None, int | None]:
+    if isinstance(event, AiocqhttpMessageEvent):
+        group_id = str(event.get_group_id())
+        sender_id = str(event.get_sender_id())
+        return (
+            int(group_id) if group_id.isdigit() else None,
+            int(sender_id) if sender_id.isdigit() else None,
+        )
+
+    session = getattr(event, "session", None)
+    if session is None:
+        return None, None
+    session_id = str(session.session_id)
+    if session.message_type == MessageType.GROUP_MESSAGE:
+        target_id = session_id.split("_")[-1]
+        is_group = True
+    elif session.message_type == MessageType.FRIEND_MESSAGE:
+        target_id = session_id
+        is_group = False
+    else:
+        return None, None
+    if not target_id.isdigit() or int(target_id) <= 0:
+        return None, None
+    return (int(target_id), None) if is_group else (None, int(target_id))
 
 
 def convert_duration_advanced(duration: int) -> str:

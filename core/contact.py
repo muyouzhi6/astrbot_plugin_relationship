@@ -5,25 +5,34 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .config import PluginConfig
-from .utils import get_ats
+from .utils import (
+    UNAVAILABLE_MESSAGE,
+    get_aiocqhttp_client,
+    get_ats,
+    get_delivery_target,
+)
 
 
 class ContactHandle:
-    def __init__(self, config: PluginConfig):
+    def __init__(self, config: PluginConfig, context):
         self.cfg = config
+        self.context = context
 
-    @staticmethod
-    async def cqhttp_send(event: AiocqhttpMessageEvent, payload: dict):
+    async def cqhttp_send(self, event: AiocqhttpMessageEvent, payload: dict):
         """用 aiocqhttp 发送消息"""
-        if event.is_private_chat():
-            payload["user_id"] = int(event.get_sender_id())
-            action = "send_private_msg"
-        else:
-            payload["group_id"] = int(event.get_group_id())
+        client = get_aiocqhttp_client(event, self.context)
+        group_id, user_id = get_delivery_target(event)
+        if client is None or (not group_id and not user_id):
+            raise ValueError(UNAVAILABLE_MESSAGE)
+        if group_id:
+            payload["group_id"] = group_id
             action = "send_group_msg"
+        else:
+            payload["user_id"] = user_id
+            action = "send_private_msg"
 
         try:
-            result = await event.bot.api.call_action(action, **payload)
+            result = await client.api.call_action(action, **payload)
             event.stop_event()
             return result
         except Exception as e:
@@ -58,7 +67,9 @@ class ContactHandle:
         uids = get_ats(event)
 
         if not uids and not gids:
-            uids, gids = await self._get_random_target(client=event.bot)
+            uids, gids = await self._get_random_target(
+                client=get_aiocqhttp_client(event, self.context)
+            )
 
         if uids:
             for uid in uids:

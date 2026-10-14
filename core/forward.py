@@ -2,14 +2,20 @@ import random
 from typing import Any
 
 from aiocqhttp import CQHttp
-
 from astrbot.api import logger
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
 from .config import PluginConfig
-from .utils import get_ats, get_reply_text, parse_multi_input
+from .utils import (
+    UNAVAILABLE_MESSAGE,
+    get_aiocqhttp_client,
+    get_ats,
+    get_delivery_target,
+    get_reply_text,
+    parse_multi_input,
+)
 
 
 class ForwardTool:
@@ -81,6 +87,7 @@ class ForwardTool:
                 logger.debug(f"转发消息成功（第{i // batch_size + 1}批）")
             except Exception:
                 logger.exception(f"转发消息失败（第{i // batch_size + 1}批）")
+                raise
 
     @staticmethod
     async def source_forward(
@@ -102,6 +109,8 @@ class ForwardTool:
         :param forward_group_id: 转发群组ID(优先使用)
         :param forward_user_id: 转发用户ID
         """
+        if not forward_group_id and not forward_user_id:
+            return False
         try:
             # 获取消息历史
             messages = await ForwardTool._get_msg_history(
@@ -128,9 +137,24 @@ class ForwardTool:
     async def check_messages(
         event: AiocqhttpMessageEvent,
         *,
+        context,
         target_id: str | int | None = None,
         count: int = 0,
     ):
+        error = await ForwardTool.run_check(
+            event, context=context, target_id=target_id, count=count
+        )
+        if error:
+            yield event.plain_result(error)
+
+    @staticmethod
+    async def run_check(
+        event: AiocqhttpMessageEvent,
+        *,
+        context,
+        target_id: str | int | None = None,
+        count: int = 0,
+    ) -> str | None:
         """
         抽查指定群或用户的消息
         支持：
@@ -138,7 +162,12 @@ class ForwardTool:
         - 群序号（来自群列表）
         - 群号 / QQ
         """
-        client = event.bot
+        client = get_aiocqhttp_client(event, context)
+        if client is None:
+            return UNAVAILABLE_MESSAGE
+        forward_group_id, forward_user_id = get_delivery_target(event)
+        if not forward_group_id and not forward_user_id:
+            return UNAVAILABLE_MESSAGE
         sgid: int | None = None
         suid: int | None = None
 
@@ -169,8 +198,7 @@ class ForwardTool:
         if not sgid and not suid:
             group_list = await client.get_group_list()
             if not group_list:
-                yield event.plain_result("未找到可用的群聊或用户，无法进行抽查")
-                return
+                return "未找到可用的群聊或用户，无法进行抽查"
             sgid = int(random.choice(group_list)["group_id"])
 
         # 执行抽查
@@ -179,11 +207,7 @@ class ForwardTool:
         )
 
         try:
-            group_id_str = str(event.get_group_id())
-            sender_id_str = str(event.get_sender_id())
-            forward_group_id = int(group_id_str) if group_id_str.isdigit() else None
-            forward_user_id = int(sender_id_str) if sender_id_str.isdigit() else None
-            await ForwardTool.source_forward(
+            sent = await ForwardTool.source_forward(
                 client=client,
                 count=count,
                 source_group_id=sgid,
@@ -191,10 +215,12 @@ class ForwardTool:
                 forward_group_id=forward_group_id,
                 forward_user_id=forward_user_id,
             )
+            if not sent:
+                return "抽查失败：没有可转发的消息，或合并转发发送失败"
             event.stop_event()
         except Exception as e:
-            yield event.plain_result(f"抽查失败：{e}")
             logger.error(f"抽查失败: {e}")
+            return f"抽查失败：{e}"
 
     @staticmethod
     async def send_admin(
